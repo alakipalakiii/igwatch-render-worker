@@ -1,0 +1,7 @@
+node_modules/
+ffmpeg_cache/
+.mgr_sources.json
+inner_mask_*.png
+*.mp4
+*.part
+.env

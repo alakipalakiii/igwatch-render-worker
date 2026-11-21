@@ -1,0 +1,12 @@
+{
+  "name": "igwatch-render-worker",
+  "private": true,
+  "version": "1.0.0",
+  "description": "FFmpeg vertical-9:16 render worker for IGWatchBot (public deployment source; no secrets).",
+  "license": "UNLICENSED",
+  "main": "ffmpeg_worker.js",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node ffmpeg_worker.js"
+  }
+}
