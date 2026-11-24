@@ -739,7 +739,7 @@ async function downloadViaGateway(fileId, dest, jobId) {
   let offset = 0, total = null;
   try {
     for (let guard = 0; guard < 5000; guard++) {
-      const c = await gwCall('source', { jobId, start: offset, len: 1500000 });
+      const c = await gwCall('source', { jobId, start: offset, len: 400000 });
       if (!c || !c.ok) throw new Error('gateway source: ' + (c && c.error || 'failed'));
       total = c.total;
       if (c.data) { const buf = Buffer.from(c.data, 'base64'); FS.writeSync(fd, buf); offset += buf.length; }
@@ -823,7 +823,7 @@ async function downloadSource(fileId, dest, jobId) {
 // on the job. We return the same shape uploadToChats does.
 async function uploadViaGateway(job, localPath) {
   const bytes = FS.readFileSync(localPath);
-  const CHUNK = 1500000;
+  const CHUNK = 400000;
   for (let off = 0; off < bytes.length; off += CHUNK) {
     const slice = bytes.subarray(off, Math.min(off + CHUNK, bytes.length));
     const done = off + slice.length >= bytes.length;
