@@ -1250,8 +1250,13 @@ async function processJob(job) {
 let igRunnerChild = null;
 let igRunnerNext = 0;
 function startIgRunner() {
-  if (String(process.env.IG_RUNNER || '').toLowerCase() === 'off') {
-    console.log('[igrunner] disabled by IG_RUNNER=off');
+  // This render-only worker ships no igrunner.py (the Instagram publisher lives
+  // in the private bot repo), so spawning it just logs a Python error every
+  // 60s and burns free-tier CPU. Default OFF; set IG_RUNNER=on only on a host
+  // that actually carries the publisher.
+  const mode = String(process.env.IG_RUNNER || 'off').toLowerCase();
+  if (mode !== 'on') {
+    console.log('[igrunner] disabled by default (IG_RUNNER not "on")');
     return;
   }
   const tick = () => {
