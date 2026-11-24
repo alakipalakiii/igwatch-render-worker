@@ -1021,9 +1021,14 @@ function startHeartbeat() {
       const r = await ffm('heartbeat', { jobId: currentJob.jobId });
       // Lost the lease (a later worker instance re-claimed the job): stop
       // extending someone else's lease and surface the takeover so the
-      // process can bail out of the render cleanly.
-      if (r.owner && r.owner !== 'fadehost_ffmpeg') {
-        console.error(`[hb] lease lost for ${currentJob.jobId} (owner=${r.owner})`);
+      // process can bail out of the render cleanly. Compare against THIS
+      // host's own id (WORKER_ID, falling back to the legacy default), not a
+      // hard-coded 'fadehost_ffmpeg' — a registered host has its own id, and
+      // the old constant made every registered worker think it lost its lease
+      // the instant it claimed a job.
+      const myId = WORKER_ID || 'fadehost_ffmpeg';
+      if (r.owner && r.owner !== myId) {
+        console.error(`[hb] lease lost for ${currentJob.jobId} (owner=${r.owner}, me=${myId})`);
         currentJob._leaseLost = true;
       } else if (r.state && r.state !== 'processing' && r.state !== 'uploading') {
         console.error(`[hb] job ${currentJob.jobId} left processing (state=${r.state})`);
