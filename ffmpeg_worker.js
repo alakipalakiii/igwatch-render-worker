@@ -391,19 +391,13 @@ async function loadMgrSources(refresh) {
   const raw = await safeText(res, 'loadMgrSources.manageGet');
   let env; try { env = JSON.parse(raw); } catch { env = {}; }
   const mods = env.result?.canonical_modules || {};
-  // worker_ffm's transitive imports: lib/settings, lib/ffmqueue, schema; plus
-  // the fhm_control endpoint. worker_media (+ its deps lib/workers, schema,
-  // lib/settings) serves the gateway the worker calls for media.
-  const NEED = new Set([
-    'endpoints/worker_ffm', 'endpoints/fhm_control', 'endpoints/worker_media',
-    'lib/settings', 'lib/ffmqueue', 'lib/workers', 'schema',
-  ]);
+  // Send the WHOLE canonical map as `sources`. Picking a hand-listed subset is
+  // fragile: worker_ffm's closure reaches publishcard → igpublish → source →
+  // rsshub/igembed → igconnect, and adding an import anywhere breaks it with
+  // MODULE_NOT_FOUND. The platform hands us every module; passing them all is
+  // exactly its contract and always resolves.
   const picked = {};
-  for (const k of Object.keys(mods)) {
-    if (NEED.has(k)) picked[k] = mods[k];
-  }
-  // An empty/partial answer must never be used as `sources`: it makes the
-  // platform resolve a cached module (MODULE_NOT_FOUND) or, worse, a stale one.
+  for (const k of Object.keys(mods)) picked[k] = mods[k];
   if (!picked['endpoints/worker_ffm']) {
     try {
       const cached = JSON.parse(FS.readFileSync(MGR_SOURCES_FILE, 'utf8'));
