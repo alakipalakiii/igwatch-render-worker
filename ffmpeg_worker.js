@@ -642,8 +642,19 @@ async function gwCall(action, body) {
     }),
   });
   let sources = await loadMgrSources();
-  let res = await call(sources);
-  if (res.status === 429) throw makeRateLimitError(res, await safeText(res, `gw.${action}.429`));
+  // A large render needs dozens of gateway round-trips (download + upload
+  // chunks); the manage API caps at 60 calls/min, so a 429 is EXPECTED mid-
+  // transfer. Honor its retry_after and retry the SAME chunk — losing one here
+  // loses the whole render (this is what turned an earlier run into
+  // send_unknown). Bounded so a hard block still fails rather than hangs.
+  let res;
+  for (let attempt = 0; ; attempt++) {
+    res = await call(sources);
+    if (res.status !== 429) break;
+    const rl = makeRateLimitError(res, await safeText(res, `gw.${action}.429`));
+    if (attempt >= 20) throw rl; // a persistent block fails cleanly
+    await sleep(Math.min(rl.waitMs || 15000, 60000));
+  }
   let raw = await safeText(res, `gw.${action}`);
   let env; try { env = JSON.parse(raw); } catch { env = {}; }
   if (!res.ok || !env.ok) {
@@ -739,7 +750,7 @@ async function downloadViaGateway(fileId, dest, jobId) {
   let offset = 0, total = null;
   try {
     for (let guard = 0; guard < 5000; guard++) {
-      const c = await gwCall('source', { jobId, start: offset, len: 400000 });
+      const c = await gwCall('source', { jobId, start: offset, len: 600000 });
       if (!c || !c.ok) throw new Error('gateway source: ' + (c && c.error || 'failed'));
       total = c.total;
       if (c.data) { const buf = Buffer.from(c.data, 'base64'); FS.writeSync(fd, buf); offset += buf.length; }
@@ -823,7 +834,7 @@ async function downloadSource(fileId, dest, jobId) {
 // on the job. We return the same shape uploadToChats does.
 async function uploadViaGateway(job, localPath) {
   const bytes = FS.readFileSync(localPath);
-  const CHUNK = 400000;
+  const CHUNK = 600000;
   for (let off = 0; off < bytes.length; off += CHUNK) {
     const slice = bytes.subarray(off, Math.min(off + CHUNK, bytes.length));
     const done = off + slice.length >= bytes.length;
