@@ -181,6 +181,21 @@ async function downloadAndExtract(res, scratch, resumed) {
 
 function startFfmpegBootstrap() {
   if (bootstrapPromise) return bootstrapPromise;
+  // On Windows, use system FFmpeg instead of downloading Linux binary
+  if (process.platform === 'win32') {
+    console.log('[ffmpeg] Windows detected - using system FFmpeg');
+    // Verify system FFmpeg is available
+    try {
+      CP.execFileSync('ffmpeg', ['-version'], { stdio: 'ignore' });
+      console.log('[ffmpeg] Using system FFmpeg from PATH');
+      FS.writeFileSync(FFMPEG_READY_FLAG, String(Date.now()));
+      return Promise.resolve(true);
+    } catch (e) {
+      console.error('[ffmpeg] system FFmpeg not found in PATH. Please install FFmpeg and add to PATH.');
+      process.exit(2);
+    }
+  }
+  if (bootstrapPromise) return bootstrapPromise;
   bootstrapPromise = (async () => {
     try {
       if (process.env.FFMPEG && process.env.FFMPEG !== 'ffmpeg') return true;
@@ -376,13 +391,16 @@ async function loadMgrSources(refresh) {
   const raw = await safeText(res, 'loadMgrSources.manageGet');
   let env; try { env = JSON.parse(raw); } catch { env = {}; }
   const mods = env.result?.canonical_modules || {};
-  // worker_ffm's transitive imports: lib/settings (KEY), lib/ffmqueue,
-  // schema; plus the fhm_control endpoint (enqueue/status/pause/resume/list).
+  // worker_ffm's transitive imports: lib/settings, lib/ffmqueue, schema; plus
+  // the fhm_control endpoint. worker_media (+ its deps lib/workers, schema,
+  // lib/settings) serves the gateway the worker calls for media.
+  const NEED = new Set([
+    'endpoints/worker_ffm', 'endpoints/fhm_control', 'endpoints/worker_media',
+    'lib/settings', 'lib/ffmqueue', 'lib/workers', 'schema',
+  ]);
   const picked = {};
   for (const k of Object.keys(mods)) {
-    if (k === 'endpoints/worker_ffm' || k === 'endpoints/fhm_control' ||
-        k === 'lib/settings' || k === 'lib/ffmqueue' || k === 'schema')
-      picked[k] = mods[k];
+    if (NEED.has(k)) picked[k] = mods[k];
   }
   // An empty/partial answer must never be used as `sources`: it makes the
   // platform resolve a cached module (MODULE_NOT_FOUND) or, worse, a stale one.
@@ -608,18 +626,46 @@ function isTransientBotError(out, status) {
 // (the zero-touch path: the host only holds WORKER_ID + WORKER_TOKEN), the
 // worker moves media through the bot instead of talking to Telegram directly,
 // so it never needs the full bot token. Same bearer as worker_ffm.
-const USE_GATEWAY = !BOT_TOKEN && !!TG_BASE;
+// Gateway mode: no BOT_TOKEN on this host, but the manage credential is set
+// (the only working ingress). Media is archived server-side.
+const USE_GATEWAY = !BOT_TOKEN && !!MGR_TOKEN;
+// The worker's media gateway call. External POSTs to tgcloud.ai are 401-blocked
+// by the platform, so this goes through the manage API (the only working
+// ingress), exactly like ffmViaManage — same credential, same sources map,
+// different module. The bot archives the result server-side, so this host
+// never holds BOT_TOKEN.
 async function gwCall(action, body) {
-  if (!USE_GATEWAY) throw new Error('gateway not configured');
-  const payload = JSON.stringify({ token: BEARER, workerId: WORKER_ID, action, ...body });
-  const res = await fetch(`${TG_BASE}/api/worker_media`, {
-    method: 'POST', headers: { 'content-type': 'application/json' }, body: payload,
+  if (!MGR_TOKEN || !MGR_BASE) throw new Error('media gateway requires TG_MGR_BASE + TG_MGR_TOKEN');
+  const call = (sources) => fetch(`${MGR_BASE}/manage/run`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${MGR_TOKEN}` },
     signal: AbortSignal.timeout(FF_HTTP_TIMEOUT_MS),
+    body: JSON.stringify({
+      module: 'endpoints/worker_media',
+      sources,
+      args: { token: BEARER, workerId: WORKER_ID, action, ...body },
+      ctx: {},
+    }),
   });
-  const raw = await safeText(res, `gw.${action}`);
-  if (!res.ok) throw new Error(`worker_media ${action} HTTP ${res.status}: ${raw.slice(0, 160)}`);
-  let out; try { out = JSON.parse(raw); } catch { throw new Error(`worker_media ${action}: bad JSON`); }
-  return out;
+  let sources = await loadMgrSources();
+  let res = await call(sources);
+  if (res.status === 429) throw makeRateLimitError(res, await safeText(res, `gw.${action}.429`));
+  let raw = await safeText(res, `gw.${action}`);
+  let env; try { env = JSON.parse(raw); } catch { env = {}; }
+  if (!res.ok || !env.ok) {
+    const desc = String(env.description || `manage/run HTTP ${res.status}`);
+    // A stale cached source (worker_media redeployed under us) shows as a
+    // module/shape error. Refetch the canonical sources once and retry.
+    if (/MODULE|unknown action|not found|jobId required/i.test(desc)) {
+      sources = await loadMgrSources(true);
+      res = await call(sources);
+      raw = await safeText(res, `gw.${action}.retry`);
+      try { env = JSON.parse(raw); } catch { env = {}; }
+      if (res.ok && env.ok) { mgrSources = sources; return env.result?.result ?? env.result; }
+    }
+    throw new Error(`worker_media ${action}: ${desc.slice(0, 160)}`);
+  }
+  return env.result?.result ?? env.result;
 }
 
 async function botApi(method, params) {
@@ -1250,14 +1296,22 @@ async function main() {
   // WORKER_ID + WORKER_TOKEN — exit at boot even though it holds a valid
   // credential. Gate on the actual bearer.
   //
-  // In GATEWAY mode (no BOT_TOKEN, TG_BASE set) the bot token and archive chat
-  // live on the SERVER, not here — the zero-touch host needs neither.
+  // In GATEWAY mode (no BOT_TOKEN, manage credential set) the bot token and
+  // archive chat live on the SERVER, not here — the zero-touch host needs
+  // neither.
   if (!BEARER) {
     console.error('WORKER_TOKEN (or FFM_TOKEN) required. Exiting.');
     process.exit(2);
   }
   if (!USE_GATEWAY && (!BOT_TOKEN || !ARCHIVE_CHAT)) {
-    console.error('Legacy mode needs BOT_TOKEN + ARCHIVE_CHAT (or set TG_BASE only, for gateway mode). Exiting.');
+    console.error('Legacy mode needs BOT_TOKEN + ARCHIVE_CHAT (or set TG_MGR_TOKEN+TG_APP_ID for gateway mode). Exiting.');
+    process.exit(2);
+  }
+  // The manage API is the live ingress (tgcloud.ai 401s external POSTs).
+  // TG_BASE is kept only for the rare case where the platform later opens
+  // external ingress. When neither TG_BASE nor TG_MGR_TOKEN is set, exit.
+  if (!TG_BASE && !MGR_TOKEN) {
+    console.error('Set TG_BASE or TG_MGR_TOKEN+TG_APP_ID to reach worker_ffm. Exiting.');
     process.exit(2);
   }
   // The manage API is the live ingress (tgcloud.ai 401s external POSTs).
