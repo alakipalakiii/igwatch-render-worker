@@ -620,9 +620,13 @@ function isTransientBotError(out, status) {
 // (the zero-touch path: the host only holds WORKER_ID + WORKER_TOKEN), the
 // worker moves media through the bot instead of talking to Telegram directly,
 // so it never needs the full bot token. Same bearer as worker_ffm.
-// Gateway mode: no BOT_TOKEN on this host, but the manage credential is set
-// (the only working ingress). Media is archived server-side.
-const USE_GATEWAY = !BOT_TOKEN && !!MGR_TOKEN;
+// The media gateway cannot archive a render under manage/run (multipart upload
+// to api.telegram.org is "Not supported" there), so a functional host must
+// carry BOT_TOKEN for the upload — the proven path. The gateway is therefore
+// not used for delivery; leave both off. (Kept as constants so the branches
+// remain, should the platform ever allow multipart in manage/run.)
+const USE_GATEWAY = false;       // scoped gateway download — off; host has BOT_TOKEN
+const GATEWAY_UPLOAD = false;    // gateway upload can't archive — never use it
 // The worker's media gateway call. External POSTs to tgcloud.ai are 401-blocked
 // by the platform, so this goes through the manage API (the only working
 // ingress), exactly like ffmViaManage — same credential, same sources map,
@@ -849,7 +853,7 @@ async function uploadViaGateway(job, localPath) {
 }
 
 async function uploadToChats(job, localPath, filename) {
-  if (USE_GATEWAY) return uploadViaGateway(job, localPath);
+  if (GATEWAY_UPLOAD) return uploadViaGateway(job, localPath);
   const bytes = FS.readFileSync(localPath);
   const marker = 'FFMJOB:' + job.jobId;
   const cap = (extra) => '🎬 ' + filename + ' — ' + marker + ' ' + extra;
